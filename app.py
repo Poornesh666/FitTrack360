@@ -244,13 +244,42 @@ if "plan" in st.session_state:
         if not frag_has_title:
             st.subheader(title_text)
 
+        # if html_fragment:
+        #     st.markdown("<div class='app-card'>", unsafe_allow_html=True)
+        #     render_html_fragment(html_fragment, height=1100)
+        #     st.markdown("</div>", unsafe_allow_html=True)
+        # else:
+        #     st.warning("No HTML fragment returned; using fallback renderer failed. Please try again.")
+
+
         if html_fragment:
             st.markdown("<div class='app-card'>", unsafe_allow_html=True)
             render_html_fragment(html_fragment, height=1100)
             st.markdown("</div>", unsafe_allow_html=True)
-        else:
-            st.warning("No HTML fragment returned; using fallback renderer failed. Please try again.")
 
+        else:
+            st.subheader("🏋️ Workout Plan")
+
+            blocks = plan.get("blocks", [])
+
+            for block in blocks:
+                st.markdown(f"### {block.get('name', 'Section')}")
+
+                for ex in block.get("exercises", []):
+                    title = ex.get("title", "Exercise")
+                    prescription = ex.get("prescription", "")
+                    rest = ex.get("rest", "")
+                    intensity = ex.get("intensity", "")
+
+                    st.write(f"**{title}**")
+                    st.write(f"- {prescription}")
+                    if rest:
+                        st.write(f"- Rest: {rest}")
+                    if intensity:
+                        st.write(f"- Intensity: {intensity}")
+
+                st.markdown("---")
+        
     # ---- IMAGES TAB ----
     with tab_images:
         st.markdown("#### Cached Gallery")

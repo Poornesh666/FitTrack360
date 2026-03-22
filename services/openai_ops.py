@@ -223,141 +223,177 @@ def _html_fragment_from_core(core: Dict[str, Any]) -> str:
     out.append("</section>")
     return "".join(out)
 
-# =============== Public API ===============
-def generate_workout_plan(
-    client: OpenAI,
-    *,
-    name: str,
-    goal: str,
-    environment: str,
-    level: str,
-    duration_min: int,
-    calorie_target: Optional[int],
-    equipment: List[str],
-    constraints: List[str],
-    model: str = "gpt-4o-mini",           # <-- default to 4o-mini for reliability + low cost
-    max_output_tokens: int = 3200,
-) -> Dict[str, Any]:
-    """
-    Two-pass generation with JSON Schema on Chat Completions.
-    - Pass 1: core JSON (small)
-    - Pass 2: view JSON (HTML fragment + talk_track)
-    Use 4o-mini by default (cheapest reliable); optional fallback stays 4o-mini.
-    """
-    primary_model = model or "gpt-4o-mini"
-    fallback_model = "gpt-4o-mini"
 
-    # ---------- PASS 1 (Core) ----------
-    sys1 = (
-        "You are a certified strength & conditioning coach. "
-        "Return data that strictly matches the provided JSON Schema."
-    )
-    user1 = (
-        f"Inputs: name={name}; goal={goal}; env={environment}; level={level}; "
-        f"duration_min={duration_min}; calorie_target={calorie_target}; "
-        f"equipment={equipment}; constraints={constraints}\n\n"
-        "Design a SINGLE-DAY workout that fits within duration_min.\n"
-        "Blocks: exactly 3 → Warm-up, Main, Cool-down.\n"
-        "Exercise counts: Warm-up ≤2; Main ≤3; Cool-down ≤2.\n"
-        "Keep notes ≤10 words; numbers realistic. 'tempo' must be present ('' if not relevant).\n"
-        "Return ONLY valid JSON per the schema; keep values compact."
-    )
-
-    def call_core(m: str, compact_retry: bool = False) -> Tuple[Dict[str, Any], Optional[str]]:
-        schema = _core_schema()
-        msg = user1 if not compact_retry else (
-            f"Inputs: name={name}; goal={goal}; env={environment}; level={level}; "
-            f"duration_min={duration_min}; calorie_target={calorie_target}; "
-            f"equipment={equipment}; constraints={constraints}\n\n"
-            "Return ONLY JSON (per schema) with meta, summary, 3 blocks (Warm-up/Main/Cool-down). "
-            "Warm-up≤2, Main≤3, Cool-down≤2 exercises. notes≤8w, tempo='' allowed. titles_for_images 3–5."
-        )
-        kwargs = _build_chat_kwargs(
-            model=m,
-            messages=[{"role": "system", "content": sys1}, {"role": "user", "content": msg}],
-            json_schema=schema,
-            max_completion_tokens=min(max_output_tokens, 2500 if not compact_retry else 1800),
-        )
-        resp = client.chat.completions.create(**kwargs)
-        debug = _first_choice_debug_payload(resp)
-        text = (resp.choices[0].message.content or "").strip()
-        if not text:
-            return {}, debug
-        return _parse_json_or_raise(text, f"pass 1 ({m})"), debug
-
-    core, dbg = call_core(primary_model, compact_retry=False)
-    if not core:
-        core, dbg2 = call_core(primary_model, compact_retry=True)
-        if not core:
-            core, dbg3 = call_core(fallback_model, compact_retry=True)
-            if not core:
-                raise ValueError(f"Empty response from model (pass 1). Debug: primary {dbg}; retry {dbg2}; fallback {dbg3}")
-
-    for k in ["meta", "summary", "blocks", "titles_for_images"]:
-        if k not in core:
-            raise ValueError(f"Core JSON missing key: {k}")
-
-    # ---------- PASS 2 (View) ----------
-    sys2 = (
-        "You are a professional fitness writer & frontend editor. "
-        "Return data strictly matching the provided JSON Schema."
-    )
-    core_compact = json.dumps(core, separators=(",", ":"), ensure_ascii=False)
-    user2 = (
-        f"Build display + motivation for this workout JSON: {core_compact}\n\n"
-        f"Constraints: plan_html_fragment MUST be an HTML FRAGMENT (no doctype/html/head/body), "
-        f"minimal inline CSS, compact cards/headers. talk_track: 90–110 words, plain text, address {name}, "
-        "motivating and safe; no medical claims. Return ONLY valid JSON per the schema."
-    )
-
-    def call_view(m: str, compact_retry: bool = False) -> Tuple[Dict[str, Any], Optional[str]]:
-        schema = _view_schema()
-        msg = user2 if not compact_retry else (
-            f"Display for: {core_compact}\n"
-            f"Return ONLY JSON with: plan_html_fragment (tiny HTML fragment) and "
-            f"talk_track (≤90 words, plain text to {name})."
-        )
-        kwargs = _build_chat_kwargs(
-            model=m,
-            messages=[{"role": "system", "content": sys2}, {"role": "user", "content": msg}],
-            json_schema=schema,
-            max_completion_tokens=min(max_output_tokens, 900 if not compact_retry else 700),
-        )
-        resp = client.chat.completions.create(**kwargs)
-        debug = _first_choice_debug_payload(resp)
-        text = (resp.choices[0].message.content or "").strip()
-        if not text:
-            return {}, debug
-        return _parse_json_or_raise(text, f"pass 2 ({m})"), debug
-
-    view, vdbg = call_view(primary_model, compact_retry=False)
-    if not view:
-        view, vdbg2 = call_view(primary_model, compact_retry=True)
-        if not view:
-            view, vdbg3 = call_view(fallback_model, compact_retry=True)
-            if not view:
-                raise ValueError(f"Empty response from model (pass 2). Debug: main {vdbg}; retry {vdbg2}; fallback {vdbg3}")
-
-    # Ensure a good HTML fragment, even if the model skimps
-    frag = _html_fragment_from_core(core)
-
-    talk_track = (view.get("talk_track") or "").strip()
-    if not talk_track:
-        tt_name = name or "athlete"
-        talk_track = (
-            f"{tt_name}, this session is your next step. Stay smooth in the warm-up, put focused energy into the main block, "
-            "and use the cool-down to lock in good form. Keep breaths steady and posture tall. You’re here, you’re capable, "
-            "and every rep builds momentum. Let’s get the work done—one set at a time."
-        )
-
+def generate_workout_plan(*args, **kwargs):
     return {
-        "meta": core["meta"],
-        "summary": core["summary"],
-        "blocks": core["blocks"],
-        "titles_for_images": core["titles_for_images"],
-        "plan_html_fragment": frag,
-        "talk_track": talk_track,
+        "summary": {
+            "title": "Beginner Workout Plan",
+            "est_total_minutes": 45,
+            "est_total_kcal": 300
+        },
+        "meta": {
+            "goal": "Fat loss",
+            "environment": "Gym",
+            "level": "Beginner"
+        },
+        "blocks": [
+            {
+                "name": "Warm-up",
+                "exercises": [
+                    {"title": "Jumping Jacks", "prescription": "2 mins"}
+                ]
+            },
+            {
+                "name": "Main Workout",
+                "exercises": [
+                    {"title": "Push-ups", "prescription": "3x10", "rest": "60 sec"},
+                    {"title": "Squats", "prescription": "3x15", "rest": "60 sec"}
+                ]
+            },
+            {
+                "name": "Cool-down",
+                "exercises": [
+                    {"title": "Stretching", "prescription": "3 mins"}
+                ]
+            }
+        ]
     }
+
+# =============== Public API ===============
+# def generate_workout_plan(
+#     client: OpenAI,
+#     *,
+#     name: str,
+#     goal: str,
+#     environment: str,
+#     level: str,
+#     duration_min: int,
+#     calorie_target: Optional[int],
+#     equipment: List[str],
+#     constraints: List[str],
+#     model: str = "gpt-4o-mini",           # <-- default to 4o-mini for reliability + low cost
+#     max_output_tokens: int = 3200,
+# ) -> Dict[str, Any]:
+#     """
+#     Two-pass generation with JSON Schema on Chat Completions.
+#     - Pass 1: core JSON (small)
+#     - Pass 2: view JSON (HTML fragment + talk_track)
+#     Use 4o-mini by default (cheapest reliable); optional fallback stays 4o-mini.
+#     """
+#     primary_model = model or "gpt-4o-mini"
+#     fallback_model = "gpt-4o-mini"
+
+#     # ---------- PASS 1 (Core) ----------
+#     sys1 = (
+#         "You are a certified strength & conditioning coach. "
+#         "Return data that strictly matches the provided JSON Schema."
+#     )
+#     user1 = (
+#         f"Inputs: name={name}; goal={goal}; env={environment}; level={level}; "
+#         f"duration_min={duration_min}; calorie_target={calorie_target}; "
+#         f"equipment={equipment}; constraints={constraints}\n\n"
+#         "Design a SINGLE-DAY workout that fits within duration_min.\n"
+#         "Blocks: exactly 3 → Warm-up, Main, Cool-down.\n"
+#         "Exercise counts: Warm-up ≤2; Main ≤3; Cool-down ≤2.\n"
+#         "Keep notes ≤10 words; numbers realistic. 'tempo' must be present ('' if not relevant).\n"
+#         "Return ONLY valid JSON per the schema; keep values compact."
+#     )
+
+#     def call_core(m: str, compact_retry: bool = False) -> Tuple[Dict[str, Any], Optional[str]]:
+#         schema = _core_schema()
+#         msg = user1 if not compact_retry else (
+#             f"Inputs: name={name}; goal={goal}; env={environment}; level={level}; "
+#             f"duration_min={duration_min}; calorie_target={calorie_target}; "
+#             f"equipment={equipment}; constraints={constraints}\n\n"
+#             "Return ONLY JSON (per schema) with meta, summary, 3 blocks (Warm-up/Main/Cool-down). "
+#             "Warm-up≤2, Main≤3, Cool-down≤2 exercises. notes≤8w, tempo='' allowed. titles_for_images 3–5."
+#         )
+#         kwargs = _build_chat_kwargs(
+#             model=m,
+#             messages=[{"role": "system", "content": sys1}, {"role": "user", "content": msg}],
+#             json_schema=schema,
+#             max_completion_tokens=min(max_output_tokens, 2500 if not compact_retry else 1800),
+#         )
+#         resp = client.chat.completions.create(**kwargs)
+#         debug = _first_choice_debug_payload(resp)
+#         text = (resp.choices[0].message.content or "").strip()
+#         if not text:
+#             return {}, debug
+#         return _parse_json_or_raise(text, f"pass 1 ({m})"), debug
+
+#     core, dbg = call_core(primary_model, compact_retry=False)
+#     if not core:
+#         core, dbg2 = call_core(primary_model, compact_retry=True)
+#         if not core:
+#             core, dbg3 = call_core(fallback_model, compact_retry=True)
+#             if not core:
+#                 raise ValueError(f"Empty response from model (pass 1). Debug: primary {dbg}; retry {dbg2}; fallback {dbg3}")
+
+#     for k in ["meta", "summary", "blocks", "titles_for_images"]:
+#         if k not in core:
+#             raise ValueError(f"Core JSON missing key: {k}")
+
+#     # ---------- PASS 2 (View) ----------
+#     sys2 = (
+#         "You are a professional fitness writer & frontend editor. "
+#         "Return data strictly matching the provided JSON Schema."
+#     )
+#     core_compact = json.dumps(core, separators=(",", ":"), ensure_ascii=False)
+#     user2 = (
+#         f"Build display + motivation for this workout JSON: {core_compact}\n\n"
+#         f"Constraints: plan_html_fragment MUST be an HTML FRAGMENT (no doctype/html/head/body), "
+#         f"minimal inline CSS, compact cards/headers. talk_track: 90–110 words, plain text, address {name}, "
+#         "motivating and safe; no medical claims. Return ONLY valid JSON per the schema."
+#     )
+
+#     def call_view(m: str, compact_retry: bool = False) -> Tuple[Dict[str, Any], Optional[str]]:
+#         schema = _view_schema()
+#         msg = user2 if not compact_retry else (
+#             f"Display for: {core_compact}\n"
+#             f"Return ONLY JSON with: plan_html_fragment (tiny HTML fragment) and "
+#             f"talk_track (≤90 words, plain text to {name})."
+#         )
+#         kwargs = _build_chat_kwargs(
+#             model=m,
+#             messages=[{"role": "system", "content": sys2}, {"role": "user", "content": msg}],
+#             json_schema=schema,
+#             max_completion_tokens=min(max_output_tokens, 900 if not compact_retry else 700),
+#         )
+#         resp = client.chat.completions.create(**kwargs)
+#         debug = _first_choice_debug_payload(resp)
+#         text = (resp.choices[0].message.content or "").strip()
+#         if not text:
+#             return {}, debug
+#         return _parse_json_or_raise(text, f"pass 2 ({m})"), debug
+
+#     view, vdbg = call_view(primary_model, compact_retry=False)
+#     if not view:
+#         view, vdbg2 = call_view(primary_model, compact_retry=True)
+#         if not view:
+#             view, vdbg3 = call_view(fallback_model, compact_retry=True)
+#             if not view:
+#                 raise ValueError(f"Empty response from model (pass 2). Debug: main {vdbg}; retry {vdbg2}; fallback {vdbg3}")
+
+#     # Ensure a good HTML fragment, even if the model skimps
+#     frag = _html_fragment_from_core(core)
+
+#     talk_track = (view.get("talk_track") or "").strip()
+#     if not talk_track:
+#         tt_name = name or "athlete"
+#         talk_track = (
+#             f"{tt_name}, this session is your next step. Stay smooth in the warm-up, put focused energy into the main block, "
+#             "and use the cool-down to lock in good form. Keep breaths steady and posture tall. You’re here, you’re capable, "
+#             "and every rep builds momentum. Let’s get the work done—one set at a time."
+#         )
+
+#     return {
+#         "meta": core["meta"],
+#         "summary": core["summary"],
+#         "blocks": core["blocks"],
+#         "titles_for_images": core["titles_for_images"],
+#         "plan_html_fragment": frag,
+#         "talk_track": talk_track,
+#     }
 
 # =============== Image Generation ===============
 def generate_image_dalle2(
