@@ -9,6 +9,9 @@ import streamlit as st
 from services.openai_ops import make_client, generate_workout_plan, generate_image_dalle2, generate_motivation_and_tts
 from utils.exporters import compose_export_html, to_pdf_with_playwright
 from utils.ui import render_html_fragment
+from services.db import add_user, get_user, update_preferences
+from services.auth import hash_password, verify_password
+import json
 
 # ---------- Page & Logging ----------
 
@@ -50,7 +53,9 @@ def _init_state() -> None:
         "equipment": [],
         "constraints": [],
         "tts_voice": "alloy",
-        "name": ""
+        "name": "",
+        "logged_in": False,
+        "username": ""
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -89,6 +94,56 @@ button[kind="secondary"] { border-radius: 10px; }
 }
 </style>
 """, unsafe_allow_html=True)
+
+# ---------- Authentication UI ----------
+if not st.session_state.logged_in:
+    st.markdown("<h2 style='text-align: center;'>🏋️ Daily Workout Planner</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center;'>Please Login or Register to continue.</p>", unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        auth_mode = st.radio("Choose action", ["Login", "Register"], horizontal=True)
+        
+        with st.form("auth_form"):
+            auth_username = st.text_input("Username")
+            auth_password = st.text_input("Password", type="password")
+            auth_name = st.text_input("Full Name (optional)") if auth_mode == "Register" else ""
+            submit_auth = st.form_submit_button(auth_mode)
+            
+        if submit_auth:
+            if not auth_username or not auth_password:
+                st.error("Username and Password are required.")
+            else:
+                if auth_mode == "Register":
+                    pwd_hash, salt = hash_password(auth_password)
+                    if add_user(auth_username, pwd_hash, salt, auth_name):
+                        st.success("Registration successful! Please login.")
+                    else:
+                        st.error("Username already exists.")
+                elif auth_mode == "Login":
+                    user = get_user(auth_username)
+                    if user and verify_password(auth_password, user['password_hash'], user['salt']):
+                        st.session_state.logged_in = True
+                        st.session_state.username = auth_username
+                        if user['name']:
+                            st.session_state.name = user['name']
+                        
+                        # Load preferences if they exist
+                        prefs = user['preferences_json']
+                        if prefs:
+                            try:
+                                prefs_dict = json.loads(prefs)
+                                for k, v in prefs_dict.items():
+                                    if k in st.session_state:
+                                        st.session_state[k] = v
+                            except json.JSONDecodeError:
+                                pass
+                        
+                        st.success("Login successful!")
+                        st.rerun()
+                    else:
+                        st.error("Invalid username or password.")
+    st.stop()
 
 # ---------- Assets ----------
 ASSETS_DIR = Path("assets")
@@ -150,7 +205,8 @@ if submitted:
     st.session_state.constraints = list(constraints)
     st.session_state.name = name.strip()
     st.session_state.tts_voice = tts_voice
-    logger.info("Saved plan settings: %s", {
+    
+    prefs_to_save = {
         "goal": st.session_state.goal,
         "environment": st.session_state.environment,
         "level": st.session_state.level,
@@ -158,9 +214,24 @@ if submitted:
         "use_calorie_target": st.session_state.use_calorie_target,
         "calorie_target": st.session_state.calorie_target if st.session_state.use_calorie_target else None,
         "equipment": st.session_state.equipment,
-        "constraints": st.session_state.constraints
-    })
+        "constraints": st.session_state.constraints,
+        "name": st.session_state.name,
+        "tts_voice": st.session_state.tts_voice
+    }
+    if st.session_state.get("logged_in"):
+        update_preferences(st.session_state.username, prefs_to_save)
+        
+    logger.info("Saved plan settings: %s", prefs_to_save)
     st.sidebar.success("Saved! Settings updated.")
+
+with st.sidebar:
+    st.markdown("---")
+    st.markdown(f"**Logged in as:** {st.session_state.get('username')}")
+    if st.button("Logout"):
+        for k in ["logged_in", "username", "name", "plan"]:
+            if k in st.session_state:
+                del st.session_state[k]
+        st.rerun()
 
 # ---------- Main Preview ----------
 st.title("🏋️ Daily Workout Planner")
